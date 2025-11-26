@@ -10,15 +10,19 @@ local Alert              = game.ReplicatedStorage.Remotes.Alert -- alert popup
 local BOOST_PER_FRIEND = 10   -- 10% per friend
 local BOOST_CAP        = 50   -- max 50, no getting silly
 
+-- small helper for friend boost
 local function computeFriendBoost(player)
     -- check mutuals in server
     local boost = 0
+
+    -- super simple loop, not worth optimizing
     for _, other in ipairs(game.Players:GetPlayers()) do
         if other ~= player and player:IsFriendsWith(other.UserId) then
             boost += BOOST_PER_FRIEND -- add up
         end
     end
-    return math.clamp(boost, 0, BOOST_CAP) -- just in case
+
+    return math.clamp(boost, 0, BOOST_CAP) -- clamp so it doesn't go wild
 end
 
 -- update one player’s boost stat
@@ -26,6 +30,7 @@ local function refreshBoostFor(player)
     -- quick ls lookup
     local ls = player:FindFirstChild("leaderstats")
     if ls then
+        -- small sanity check
         local fb = ls:FindFirstChild("FriendBoost")
         if fb then
             fb.Value = computeFriendBoost(player) -- drop in new value
@@ -50,7 +55,9 @@ DataRequest.OnServerInvoke = function(Player)
             task.wait(.5) -- tiny cooldown
         until ProfileService:IsLoaded(Player) or os.clock() - t0 >= 20 -- timeout safety
     end
-    return ProfileService:GetPlayerProfile(Player) -- send back whatever we got
+
+    -- fallback, send whatever we get
+    return ProfileService:GetPlayerProfile(Player) 
 end
 
 -- setup stats when a player spawns in
@@ -90,7 +97,7 @@ local function OnPlayerAdded(Player)
     Steal.Value = Data.Steal
     Steal.Parent = leaderstats
 
-    -- friend boost
+    -- friend boost stat
     local friendBoost = Instance.new("IntValue")
     friendBoost.Name  = "FriendBoost"
     friendBoost.Value = computeFriendBoost(Player)
@@ -98,10 +105,12 @@ local function OnPlayerAdded(Player)
 
     -- sync live values
     coroutine.wrap(function()
+        -- runs forever basically, keep stats synced
         while true do
-            task.wait() -- simple loop
+            task.wait() -- small delay so it’s not too spammy
+
+            -- make sure player didn't disappear magically
             if Player then
-                -- keep stats up-to-date
                 Cash.Value     = Data.Cash
                 Cash2.Value    = Data.PremiumCurrency
                 Rebirths.Value = Data.Rebirth
@@ -113,20 +122,22 @@ end
 
 -- init for current players
 for _, p in ipairs(game.Players:GetPlayers()) do
-    OnPlayerAdded(p)  -- setup
-    refreshAllBoosts() -- make sure boosts aren't stale
+    OnPlayerAdded(p)     -- setup
+    refreshAllBoosts()   -- update boosts
 end
 
 game.Players.PlayerAdded:Connect(OnPlayerAdded)
 
 game.Players.PlayerRemoving:Connect(function(Player)
+    -- quick exit stamp
     local Data = ProfileService:GetPlayerProfile(Player)
-    Data.LastExit = os.time() -- stamp exit time
+    Data.LastExit = os.time()
+
     refreshAllBoosts() -- clean boost list
 end)
 
 -- belt refs
-local SPAWN_INTERVAL = 3 -- how fast units spawn
+local SPAWN_INTERVAL = 3 -- spawn timing (slow enough)
 local Belt      = workspace:WaitForChild("Belt")
 local BeltStart = workspace:WaitForChild("BeltStart")
 local BeltEnd   = workspace:WaitForChild("BeltEnd")
@@ -146,7 +157,7 @@ local rarityWeights = {
     Celestial    = 0.3,
     Transcendent = 0.05,
 }
--- simple weighted rarity system
+-- really simple weighted system, nothing fancy
 
 -- pity flags
 local GuranteedSpawns = {
@@ -172,20 +183,20 @@ local LastSpawned = {
 -- roll rarity
 local function getRandomRarity()
     local pool = {} -- temp pool
+    -- cheap weight system, good enough
     for rarity, weight in pairs(rarityWeights) do
-        -- multiply weights so tiny values still work
         for _ = 1, math.floor(weight * 10) do
             table.insert(pool, rarity)
         end
     end
-    return pool[math.random(1, #pool)] -- pick one
+    return pool[math.random(1, #pool)] -- pick random
 end
 
 -- pick hero from rarity, respect pity
 local function getRandomHero()
     local rarity = getRandomRarity()
 
-    -- check pity flags
+    -- pity overrides (simple but works)
     if GuranteedSpawns.Legendary then
         rarity = "Legendary"
         GuranteedSpawns.Legendary = false
@@ -198,9 +209,9 @@ local function getRandomHero()
     end
 
     local list = UnitStats[rarity]
-    if not list then return end -- no list found somehow
+    if not list then return end -- no list somehow
 
-    -- grab random unit name
+    -- convert dictionary → array
     local keys = {}
     for name in pairs(list) do
         table.insert(keys, name)
@@ -214,20 +225,23 @@ local function moveWithPath(npc, destination)
     local root = npc:FindFirstChild("HumanoidRootPart")
     if not hum or not root then return end -- missing stuff
 
-    local token = {} -- new token for this npc
+    local token = {} -- this path’s token
     activePathTokens[npc] = token -- store token
 
-    -- create path
+    -- create path (default settings mostly)
     local path = PathfindingService:CreatePath({
         AgentRadius  = 2,
         AgentHeight  = 5,
-        AgentCanJump = false,
+        AgentCanJump = false, -- no jumping on belt
     })
     path:ComputeAsync(root.Position, destination)
 
+    -- try following the path
     if path.Status == Enum.PathStatus.Success then
         for _, wp in ipairs(path:GetWaypoints()) do
-            if activePathTokens[npc] ~= token then return end -- stopped
+            -- stop if canceled
+            if activePathTokens[npc] ~= token then return end
+
             hum:MoveTo(wp.Position)
             local ok = hum.MoveToFinished:Wait()
             if not ok then break end -- sometimes fails
@@ -241,17 +255,20 @@ end
 coroutine.wrap(function()
     while task.wait(1) do
         local now = os.clock()
+
+        -- tiny loop, no need to optimize
         for rarity, threshold in pairs(SpawnThresholds) do
+            -- countdown ui
             local counter = game.ReplicatedStorage:FindFirstChild("Guranteed"..rarity)
             if counter then
-                -- update countdown
                 counter.Value = SpawnThresholds[rarity] - (now - LastSpawned[rarity])
             end
+
             -- check if pity triggers
             if now - LastSpawned[rarity] >= threshold then
                 print("guaranteed", rarity) -- debug spam
                 LastSpawned[rarity] = now
-                GuranteedSpawns[rarity] = true
+                GuranteedSpawns[rarity] = true -- mark next spawn
             end
         end
     end
@@ -259,11 +276,12 @@ end)()
 
 -- main spawn loop
 local activeCount = 0 -- how many npcs alive rn
-local MAX_ACTIVE_NPCS = 25 -- cap so belt doesn't explode
+local MAX_ACTIVE_NPCS = 25 -- cap so belt doesn't clog
 
 while true do
+    -- simple throttle
     if activeCount >= MAX_ACTIVE_NPCS then
-        task.wait(SPAWN_INTERVAL) -- chill until space
+        task.wait(SPAWN_INTERVAL)
         continue
     end
 
@@ -274,17 +292,18 @@ while true do
 
     local template = game.ReplicatedStorage.Units:FindFirstChild(name)
     if not template then
-        print("missing:", name) -- unit not found
+        print("missing:", name) -- missing template
         continue
     end
 
     coroutine.wrap(function()
+        -- setup npc
         local hero = template:Clone()
         hero.Parent = Belt
-        hero:SetPrimaryPartCFrame(BeltStart.CFrame + Vector3.new(0, 3, 0)) -- position it
+        hero:SetPrimaryPartCFrame(BeltStart.CFrame + Vector3.new(0, 3, 0)) -- place above belt
         warn("spawned:", name, "|", rarity)
 
-        hero:WaitForChild("HumanoidRootPart"):SetNetworkOwner(nil) -- server owns it
+        hero:WaitForChild("HumanoidRootPart"):SetNetworkOwner(nil) -- server controls it
 
         local al = hero.Humanoid:LoadAnimation(script.WalkAnim)
         al:AdjustSpeed(1.5) -- walk speed
@@ -318,7 +337,7 @@ while true do
         -- no collides
         for _, part in pairs(hero:GetChildren()) do
             if part:IsA("BasePart") then
-                game.PhysicsService:SetPartCollisionGroup(part, "NPCS") -- shove in npc group
+                game.PhysicsService:SetPartCollisionGroup(part, "NPCS") -- drop in npc group
             end
         end
 
@@ -329,22 +348,27 @@ while true do
                 local data = ProfileService:GetPlayerProfile(player)
                 local cost = UnitStats[rarity][name].Cost or 100
 
+                -- basic cash check
                 if data and data.Cash >= cost then
 
                     -- already owned? ping prev owner
                     if hero:GetAttribute("Purchased") then
                         local oldBuyer = hero:GetAttribute("Purchased")
                         local oldPlr = game.Players:FindFirstChild(oldBuyer)
+
+                        -- notify if they still exist
                         if oldPlr then
-                            -- send alert
-                            Alert:FireClient(oldPlr, {Text = player.Name.." stole your hero!", Color = Color3.fromRGB(255, 0, 4)})
+                            Alert:FireClient(oldPlr, {
+                                Text = player.Name.." stole your hero!",
+                                Color = Color3.fromRGB(255, 0, 4)
+                            })
                         else
                             return
                         end
                     end
 
                     data.Cash -= cost
-                    hero:SetAttribute("Purchased", player.Name)
+                    hero:SetAttribute("Purchased", player.Name) -- mark as bought
 
                     -- redirect + clean up
                     moveWithPath(hero, workspace.SpawnLocation.Position)
@@ -352,7 +376,7 @@ while true do
                     if hero and hero.Parent and hero:GetAttribute("Purchased") == player.Name then
                         al:Stop()
                         hero:Destroy()
-                        activeCount -= 1
+                        activeCount -= 1 -- free slot
                     end
                 end
             end)
@@ -364,7 +388,7 @@ while true do
             if hero and hero.Parent and not hero:GetAttribute("Purchased") then
                 al:Stop()
                 hero:Destroy()
-                activeCount -= 1 -- free slot
+                activeCount -= 1 -- cleaned
             end
         end)
     end)()

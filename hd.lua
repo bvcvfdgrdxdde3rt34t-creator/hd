@@ -1,93 +1,107 @@
 -- services & modules
-local CollectionService  = game:GetService("CollectionService")
-local PathfindingService = game:GetService("PathfindingService")
-local UnitStats          = require(game.ReplicatedStorage.UnitStatsModule)
-local ProfileService     = require(script.ProfileService)
-local DataRequest        = game.ReplicatedStorage.DataRequest
-local Alert              = game.ReplicatedStorage.Remotes.Alert
- 
+local CollectionService  = game:GetService("CollectionService") -- tagging stuff
+local PathfindingService = game:GetService("PathfindingService") -- path calc
+local UnitStats          = require(game.ReplicatedStorage.UnitStatsModule) -- unit data
+local ProfileService     = require(script.ProfileService) -- saves
+local DataRequest        = game.ReplicatedStorage.DataRequest -- remote for pulling data
+local Alert              = game.ReplicatedStorage.Remotes.Alert -- alert popup
+
 -- friend boost setup
-local BOOST_PER_FRIEND = 10   -- 10%
-local BOOST_CAP        = 50   -- max 50%
- 
+local BOOST_PER_FRIEND = 10   -- 10% per friend
+local BOOST_CAP        = 50   -- max 50, no getting silly
+
 local function computeFriendBoost(player)
     -- check mutuals in server
     local boost = 0
     for _, other in ipairs(game.Players:GetPlayers()) do
         if other ~= player and player:IsFriendsWith(other.UserId) then
-            boost += BOOST_PER_FRIEND
+            boost += BOOST_PER_FRIEND -- add up
         end
     end
-    return math.clamp(boost, 0, BOOST_CAP)
+    return math.clamp(boost, 0, BOOST_CAP) -- just in case
 end
- 
+
 -- update one player’s boost stat
 local function refreshBoostFor(player)
+    -- quick ls lookup
     local ls = player:FindFirstChild("leaderstats")
     if ls then
         local fb = ls:FindFirstChild("FriendBoost")
         if fb then
-            fb.Value = computeFriendBoost(player)
+            fb.Value = computeFriendBoost(player) -- drop in new value
         end
     end
 end
- 
+
 -- refresh everyone when roster changes
 local function refreshAllBoosts()
+    -- lazy loop since player count is small
     for _, plr in ipairs(game.Players:GetPlayers()) do
         refreshBoostFor(plr)
     end
 end
- 
+
 -- handle data requests
 DataRequest.OnServerInvoke = function(Player)
+    -- wait for load (roblox loves being slow)
     if not ProfileService:IsLoaded(Player) then     
         local t0 = os.clock()
-        repeat task.wait(.5) until ProfileService:IsLoaded(Player) or os.clock() - t0 >= 20
+        repeat 
+            task.wait(.5) -- tiny cooldown
+        until ProfileService:IsLoaded(Player) or os.clock() - t0 >= 20 -- timeout safety
     end
-    return ProfileService:GetPlayerProfile(Player)
+    return ProfileService:GetPlayerProfile(Player) -- send back whatever we got
 end
- 
+
 -- setup stats when a player spawns in
 local function OnPlayerAdded(Player)
-    repeat task.wait(.1) until ProfileService:IsLoaded(Player) 
-    ProfileService:Replicate(Player)
+    -- wait until fully loaded
+    repeat task.wait(.1) until ProfileService:IsLoaded(Player)
+
+    ProfileService:Replicate(Player) -- push data to client
     local Data = ProfileService:GetPlayerProfile(Player)
- 
+
+    -- ls folder
     local leaderstats = Instance.new("Folder")
     leaderstats.Name = "leaderstats"
     leaderstats.Parent = Player
- 
+
+    -- cash
     local Cash = Instance.new("NumberValue")
     Cash.Name = "Cash"
     Cash.Value = Data.Cash
     Cash.Parent = leaderstats
- 
+
+    -- premium
     local Cash2 = Instance.new("NumberValue")
     Cash2.Name = "G$"
     Cash2.Value = Data.PremiumCurrency
     Cash2.Parent = leaderstats
- 
+
+    -- rebirths
     local Rebirths = Instance.new("NumberValue")
     Rebirths.Name = "Rebirth"
     Rebirths.Value = Data.Rebirth
     Rebirths.Parent = leaderstats
- 
+
+    -- steal stat
     local Steal = Instance.new("NumberValue")
     Steal.Name = "Steal"
     Steal.Value = Data.Steal
     Steal.Parent = leaderstats
- 
+
+    -- friend boost
     local friendBoost = Instance.new("IntValue")
     friendBoost.Name  = "FriendBoost"
     friendBoost.Value = computeFriendBoost(Player)
     friendBoost.Parent = leaderstats
- 
+
     -- sync live values
     coroutine.wrap(function()
         while true do
-            task.wait()
+            task.wait() -- simple loop
             if Player then
+                -- keep stats up-to-date
                 Cash.Value     = Data.Cash
                 Cash2.Value    = Data.PremiumCurrency
                 Rebirths.Value = Data.Rebirth
@@ -96,29 +110,30 @@ local function OnPlayerAdded(Player)
         end
     end)()
 end
- 
+
 -- init for current players
 for _, p in ipairs(game.Players:GetPlayers()) do
-    OnPlayerAdded(p)
-    refreshAllBoosts()
+    OnPlayerAdded(p)  -- setup
+    refreshAllBoosts() -- make sure boosts aren't stale
 end
- 
+
 game.Players.PlayerAdded:Connect(OnPlayerAdded)
+
 game.Players.PlayerRemoving:Connect(function(Player)
     local Data = ProfileService:GetPlayerProfile(Player)
-    Data.LastExit = os.time()
-    refreshAllBoosts()
+    Data.LastExit = os.time() -- stamp exit time
+    refreshAllBoosts() -- clean boost list
 end)
- 
+
 -- belt refs
-local SPAWN_INTERVAL = 3
+local SPAWN_INTERVAL = 3 -- how fast units spawn
 local Belt      = workspace:WaitForChild("Belt")
 local BeltStart = workspace:WaitForChild("BeltStart")
 local BeltEnd   = workspace:WaitForChild("BeltEnd")
- 
+
 -- path tokens (cancel support)
-local activePathTokens = {}
- 
+local activePathTokens = {} -- used to stop old paths
+
 -- rarity weights
 local rarityWeights = {
     Common       = 60,
@@ -131,42 +146,46 @@ local rarityWeights = {
     Celestial    = 0.3,
     Transcendent = 0.05,
 }
- 
+-- simple weighted rarity system
+
 -- pity flags
 local GuranteedSpawns = {
     Legendary = false,
     Mythic    = false,
     Ascended  = false
 }
- 
+
 -- pity timers (s)
 local SpawnThresholds = {
     Legendary = 1800, -- 30m
     Mythic    = 3600, -- 1h
     Ascended  = 7200  -- 2h
 }
- 
+
 -- last pity times
 local LastSpawned = {
     Legendary = os.clock(),
     Mythic    = os.clock(),
     Ascended  = os.clock()
 }
- 
+
 -- roll rarity
 local function getRandomRarity()
-    local pool = {}
+    local pool = {} -- temp pool
     for rarity, weight in pairs(rarityWeights) do
+        -- multiply weights so tiny values still work
         for _ = 1, math.floor(weight * 10) do
             table.insert(pool, rarity)
         end
     end
-    return pool[math.random(1, #pool)]
+    return pool[math.random(1, #pool)] -- pick one
 end
- 
+
 -- pick hero from rarity, respect pity
 local function getRandomHero()
     local rarity = getRandomRarity()
+
+    -- check pity flags
     if GuranteedSpawns.Legendary then
         rarity = "Legendary"
         GuranteedSpawns.Legendary = false
@@ -177,45 +196,47 @@ local function getRandomHero()
         rarity = "Ascended"
         GuranteedSpawns.Ascended = false
     end
- 
+
     local list = UnitStats[rarity]
-    if not list then return end
- 
+    if not list then return end -- no list found somehow
+
+    -- grab random unit name
     local keys = {}
     for name in pairs(list) do
         table.insert(keys, name)
     end
     return keys[math.random(1, #keys)], rarity
 end
- 
+
 -- move npc along path
 local function moveWithPath(npc, destination)
     local hum  = npc:FindFirstChildOfClass("Humanoid")
     local root = npc:FindFirstChild("HumanoidRootPart")
-    if not hum or not root then return end
- 
-    local token = {}
-    activePathTokens[npc] = token
- 
+    if not hum or not root then return end -- missing stuff
+
+    local token = {} -- new token for this npc
+    activePathTokens[npc] = token -- store token
+
+    -- create path
     local path = PathfindingService:CreatePath({
         AgentRadius  = 2,
         AgentHeight  = 5,
         AgentCanJump = false,
     })
     path:ComputeAsync(root.Position, destination)
- 
+
     if path.Status == Enum.PathStatus.Success then
         for _, wp in ipairs(path:GetWaypoints()) do
-            if activePathTokens[npc] ~= token then return end
+            if activePathTokens[npc] ~= token then return end -- stopped
             hum:MoveTo(wp.Position)
             local ok = hum.MoveToFinished:Wait()
-            if not ok then break end
+            if not ok then break end -- sometimes fails
         end
     else
-        warn("path failed:", npc.Name)
+        warn("path failed:", npc.Name) -- debug
     end
 end
- 
+
 -- pity countdown
 coroutine.wrap(function()
     while task.wait(1) do
@@ -223,58 +244,61 @@ coroutine.wrap(function()
         for rarity, threshold in pairs(SpawnThresholds) do
             local counter = game.ReplicatedStorage:FindFirstChild("Guranteed"..rarity)
             if counter then
+                -- update countdown
                 counter.Value = SpawnThresholds[rarity] - (now - LastSpawned[rarity])
             end
+            -- check if pity triggers
             if now - LastSpawned[rarity] >= threshold then
-                print("guaranteed", rarity)
+                print("guaranteed", rarity) -- debug spam
                 LastSpawned[rarity] = now
                 GuranteedSpawns[rarity] = true
             end
         end
     end
 end)()
- 
+
 -- main spawn loop
-local activeCount = 0
-local MAX_ACTIVE_NPCS = 25
- 
+local activeCount = 0 -- how many npcs alive rn
+local MAX_ACTIVE_NPCS = 25 -- cap so belt doesn't explode
+
 while true do
     if activeCount >= MAX_ACTIVE_NPCS then
-        task.wait(SPAWN_INTERVAL)
+        task.wait(SPAWN_INTERVAL) -- chill until space
         continue
     end
- 
+
     task.wait(SPAWN_INTERVAL)
- 
+
     local name, rarity = getRandomHero()
-    if not name then continue end
- 
+    if not name then continue end -- bad roll
+
     local template = game.ReplicatedStorage.Units:FindFirstChild(name)
     if not template then
-        print("missing:", name)
+        print("missing:", name) -- unit not found
         continue
     end
- 
+
     coroutine.wrap(function()
         local hero = template:Clone()
         hero.Parent = Belt
-        hero:SetPrimaryPartCFrame(BeltStart.CFrame + Vector3.new(0, 3, 0))
+        hero:SetPrimaryPartCFrame(BeltStart.CFrame + Vector3.new(0, 3, 0)) -- position it
         warn("spawned:", name, "|", rarity)
-        hero:WaitForChild("HumanoidRootPart"):SetNetworkOwner(nil)
- 
+
+        hero:WaitForChild("HumanoidRootPart"):SetNetworkOwner(nil) -- server owns it
+
         local al = hero.Humanoid:LoadAnimation(script.WalkAnim)
-        al:AdjustSpeed(1.5)
+        al:AdjustSpeed(1.5) -- walk speed
         al:Play()
- 
+
         activeCount += 1
- 
+
         -- gui labels
         local frame = hero.BillboardGui.Frame
         frame.RarityText.Text = rarity
         frame.Cost.Text       = "$"..UnitStats[rarity][name].Cost
         frame.UnitName.Text   = name
         frame.Tick.Text       = "$"..UnitStats[rarity][name].CashReward.."/s"   
- 
+
         -- rarity colors (quick n dirty)
         local colors = {
             Common       = Color3.fromRGB(179, 179, 179),
@@ -288,39 +312,43 @@ while true do
             Transcendent = Color3.fromRGB(173, 0, 3),
         }
         if colors[rarity] then
-            frame.RarityText.TextColor3 = colors[rarity]
+            frame.RarityText.TextColor3 = colors[rarity] -- set color
         end
- 
+
         -- no collides
         for _, part in pairs(hero:GetChildren()) do
             if part:IsA("BasePart") then
-                game.PhysicsService:SetPartCollisionGroup(part, "NPCS")
+                game.PhysicsService:SetPartCollisionGroup(part, "NPCS") -- shove in npc group
             end
         end
- 
+
         -- buy prompt
         local prompt = hero:FindFirstChildWhichIsA("ProximityPrompt", true)
         if prompt then
             prompt.Triggered:Connect(function(player)
                 local data = ProfileService:GetPlayerProfile(player)
                 local cost = UnitStats[rarity][name].Cost or 100
+
                 if data and data.Cash >= cost then
+
                     -- already owned? ping prev owner
                     if hero:GetAttribute("Purchased") then
                         local oldBuyer = hero:GetAttribute("Purchased")
                         local oldPlr = game.Players:FindFirstChild(oldBuyer)
                         if oldPlr then
+                            -- send alert
                             Alert:FireClient(oldPlr, {Text = player.Name.." stole your hero!", Color = Color3.fromRGB(255, 0, 4)})
                         else
                             return
                         end
                     end
- 
+
                     data.Cash -= cost
                     hero:SetAttribute("Purchased", player.Name)
- 
+
                     -- redirect + clean up
                     moveWithPath(hero, workspace.SpawnLocation.Position)
+
                     if hero and hero.Parent and hero:GetAttribute("Purchased") == player.Name then
                         al:Stop()
                         hero:Destroy()
@@ -329,14 +357,14 @@ while true do
                 end
             end)
         end
- 
+
         -- if never bought, just walk out
         task.spawn(function()
             moveWithPath(hero, BeltEnd.Position)
             if hero and hero.Parent and not hero:GetAttribute("Purchased") then
                 al:Stop()
                 hero:Destroy()
-                activeCount -= 1
+                activeCount -= 1 -- free slot
             end
         end)
     end)()
